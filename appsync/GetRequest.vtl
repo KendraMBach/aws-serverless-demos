@@ -1,0 +1,208 @@
+## GetRequest.vtl Resolver Example File
+## Author: Kendra Bach
+##
+## Resolver Goal: Get one or more requests for a system/user based on either the request_id or
+### one or more of the following: title, parent_request_id, use_case, group, user, front_end
+### where each of the above are an attribute w/ a corresponding index in DDB
+##
+
+
+
+## Base Case - one request_id is given, one record is returned as a list
+#if($context.arguments.input.request_id)
+{
+    "version" : "2017-02-28",
+    "operation" : "Query",
+    "query" : {
+        "expression": "request_id = :request_id",
+        "expressionValues" : {
+            ":request_id" : {
+                "S" : "${ctx.args.input.request_id}"
+            }
+        }
+    },
+    ## Add 'limit' and 'nextToken' arguments to this field in your schema to implement pagination. **
+    "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+    "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+}
+
+## Case 2: request_id is not given and one or many attributes are provided, one or many records may be returned
+#else
+
+  ## Load and handle all potential attributes
+  ## user and group are handled separately due to being acknowledged as reserved words
+
+  #set ($GSIs = {})
+  $util.qr($GSIs.put("title", ${ctx.args.input.title}))
+  $util.qr($GSIs.put("parent_request_id", ${ctx.args.input.parent_request_id}))
+  $util.qr($GSIs.put("use_case", ${ctx.args.input.use_case}))
+  $util.qr($GSIs.put("#group_attr", ${ctx.args.input.group}))
+  $util.qr($GSIs.put("front_end", ${ctx.args.input.front_end}))
+  $util.qr($GSIs.put("#user_attr", ${ctx.args.input.user}))
+
+  #set($expression_names = {})
+
+  #if($GSIs["#user_attr"])
+    $util.qr($expression_names.put("#user_attr", "user"))
+  #end
+
+  #if($GSIs["#group_attr"])
+    $util.qr($expression_names.put("#group_attr", "group"))
+  #end
+
+  ## Place all filter attributes in a dictionary, excluding the first attribute
+  ## The first non null attribute will be used as the index,
+  ### as all attributes will always be passed in the same order as provided in the schema
+
+  #set ($Filter_GSIs = {})
+  #set ($num = 1)
+  #set($index_expression_val = {})
+
+  #foreach ($GSI in $GSIs.entrySet())
+    #if($GSI.value)
+      #if($index_expression)
+
+      	#if($GSI.key == "#user_attr")
+        	$util.qr($Filter_GSIs.put("user_attr", $GSI.value))
+        #elseif($GSI.key == "#group_attr")
+        	$util.qr($Filter_GSIs.put("group_attr", $GSI.value))
+        #else
+      		$util.qr($Filter_GSIs.put($GSI.key, $GSI.value))
+        #end
+
+      #else
+      #end
+      #if($num == 1)
+
+        ## Build the index expression and handle the user and group attributes accordingly
+
+        #set($map = {})
+        $util.qr($map.put("S", "$GSI.value"))
+
+        #if($GSI.key == "#user_attr")
+        	#set ($index_expression = "$GSI.key" + " = " + ":user_attr")
+        	#set ($index_GSI = "user-index")
+            $util.qr($index_expression_val.put(":user_attr",$map))
+        #elseif($GSI.key == "#group_attr")
+        	#set ($index_expression = "$GSI.key" + " = " + ":group_attr")
+        	#set ($index_GSI = "group-index")
+            $util.qr($index_expression_val.put(":group_attr",$map))
+        #else
+        	#set ($index_expression = "$GSI.key" + " = " + ":$GSI.key")
+        	#set ($index_GSI = $GSI.key + "-index")
+            $util.qr($index_expression_val.put(":$GSI.key",$map))
+        #end
+
+
+        ## Build the index expression names dictionary, specific to user and group attributes,
+        ### used to map the values to the new names of the reserved words (user and group)
+
+        #set($index_expression_names = {})
+
+        #if($GSI.key == "#user_attr")
+
+          $util.qr($index_expression_names.put("#user_attr", "user"))
+          #set ($index_GSI = "user-index")
+        #end
+
+        #if($GSI.key == "#group_attr")
+
+          $util.qr($index_expression_names.put("#group_attr", "group"))
+          #set ($index_GSI = "group-index")
+        #end
+
+        #set($num = 2)
+
+      #end
+    #end
+  #end
+
+  ## Build the filter expression and handle group and user accordingly
+  #foreach ($Filter in $Filter_GSIs.entrySet())
+     #if($Expression)
+     	#if($Filter.key == "group_attr")
+        	#set ($Expression = $Expression + " and " + "#group_attr" + " = " + ":group_attr")
+        #elseif($Filter.key == "user_attr")
+        	#set ($Expression = $Expression + " and " + "#user_attr" + " = " + ":user_attr")
+        #else
+     		#set ($Expression = $Expression + " and " + "$Filter.key" + " = " + ":$Filter.key")
+        #end
+  	 #else
+     	#if($Filter.key == "group_attr")
+        	#set ($Expression = "#group_attr" + " = " + ":group_attr")
+        #elseif($Filter.key == "user_attr")
+        	#set ($Expression = "#user_attr" + " = " + ":user_attr")
+        #else
+     		#set ($Expression = "$Filter.key" + " = " + ":$Filter.key")
+        #end
+
+     #end
+  #end
+
+   ## Build the dictionary to define the filter expression values
+   #set($ExpressionVals = {})
+    #foreach($Filter in $Filter_GSIs.entrySet())
+        #set($map = {})
+        $util.qr($map.put("S", "$Filter.value"))
+        $util.qr($ExpressionVals.put(":$Filter.key",$map))
+    #end
+
+    ## Case 2.1 - Filters exist
+    #if($Expression)
+      {
+      "version" : "2017-02-28",
+      "operation" : "Query",
+      "index" : "$index_GSI",
+      "query" : {
+          "expression": "$index_expression",
+
+          #if(!$index_expression_names.isEmpty())
+          	"expressionNames" : $util.toJson($index_expression_names),
+          #else
+          #end
+
+          "expressionValues" : $util.toJson($index_expression_val)
+
+          },
+      "filter" : {
+          "expression": "$Expression",
+
+          #if(!$expression_names.isEmpty())
+          	"expressionNames" : $util.toJson($expression_names),
+          #else
+          #end
+
+          "expressionValues" : $util.toJson($ExpressionVals)
+      },
+      ## Add 'limit' and 'nextToken' arguments to this field in your schema to implement pagination. **
+      "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+      "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+      }
+
+    ## Case 2.2 - Filters do not exist, only one index attribute
+    #else
+
+       {
+      "version" : "2017-02-28",
+      "operation" : "Query",
+      "index" : "$index_GSI",
+      "query" : {
+          "expression": "$index_expression",
+
+           #if(!$index_expression_names.isEmpty())
+          	"expressionNames" : $util.toJson($index_expression_names),
+          #else
+          #end
+
+          "expressionValues" : $util.toJson($index_expression_val)
+          },
+      ## Add 'limit' and 'nextToken' arguments to this field in your schema to implement pagination. **
+      "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+      "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+      }
+    #end
+#end
+
+
+## Pass back the result from DynamoDB. **
+$util.toJson($ctx.result)

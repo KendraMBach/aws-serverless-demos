@@ -1,0 +1,17 @@
+schema {
+  query: Query
+}
+
+type Query {
+	GetRequest(input: RequestInput, nextToken: String): RequestsConnection
+}
+
+input RequestInput {
+	request_id: ID
+	parent_request_id: ID
+	user: String
+	title: String
+	group: String
+	use_case: String
+	front_end: String
+}
